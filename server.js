@@ -32,11 +32,19 @@ const generateSignature = (timestamp, payload) => {
 };
 
 // Hàm gửi Webhook sang web_CTV
-const sendWebhook = async (targetUrl, payload) => {
+const isHtmlResponse = (contentType, data) => {
+  if (String(contentType || '').toLowerCase().includes('text/html')) return true;
+  return typeof data === 'string' && /^\s*<(?:!doctype\s+html|html)\b/i.test(data);
+};
+
+const sendWebhook = async (targetUrl, payload, expectedResponse) => {
+  if (!targetUrl) {
+    return { success: false, error: 'Webhook URL chưa được cấu hình trên Render.' };
+  }
+
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const signature = generateSignature(timestamp, payload);
   console.log(`[COMPANY A] 📤 Đang gửi Webhook tới: ${targetUrl}`);
-  console.log(`[COMPANY A] Payload:`, JSON.stringify(payload, null, 2));
 
   try {
     const response = await axios.post(targetUrl, payload, {
@@ -48,11 +56,36 @@ const sendWebhook = async (targetUrl, payload) => {
       },
       timeout: 5000
     });
+
+    const contentType = response.headers['content-type'];
+    if (isHtmlResponse(contentType, response.data)) {
+      return {
+        success: false,
+        status: response.status,
+        error: 'Webhook URL trả về trang HTML. Hãy kiểm tra URL API trên Render.'
+      };
+    }
+
+    if (String(response.data).trim() !== expectedResponse) {
+      return {
+        success: false,
+        status: response.status,
+        error: 'Webhook URL không trả về xác nhận từ API backend.'
+      };
+    }
+
     console.log(`[COMPANY A] ✅ Webhook gửi thành công. Response status: ${response.status}`);
-    return { success: true, data: response.data };
+    return { success: true, status: response.status, data: response.data };
   } catch (error) {
     console.error(`[COMPANY A] ❌ Webhook thất bại: ${error.message}`);
-    return { success: false, error: error.response?.data || error.message };
+    const contentType = error.response?.headers?.['content-type'];
+    const responseData = error.response?.data;
+    const message = isHtmlResponse(contentType, responseData)
+      ? 'Webhook URL trả về trang HTML thay vì API. Hãy kiểm tra URL API trên Render.'
+      : (typeof responseData === 'string' && responseData.length < 300
+        ? responseData
+        : error.message);
+    return { success: false, status: error.response?.status, error: message };
   }
 };
 
@@ -114,8 +147,12 @@ app.post('/mock/trigger-status', async (req, res) => {
     durationMonths
   };
 
-  const result = await sendWebhook(process.env.CTV_WEBHOOK_STATUS_URL, payload);
-  return res.json({ result, payloadSent: payload });
+  const result = await sendWebhook(
+    process.env.CTV_WEBHOOK_STATUS_URL,
+    payload,
+    'Callback contract processed successfully'
+  );
+  return res.status(result.success ? 200 : 502).json({ result, payloadSent: payload });
 });
 
 /* ==========================================================================
@@ -148,8 +185,12 @@ app.post('/mock/trigger-payment', async (req, res) => {
     paymentStatus
   };
 
-  const result = await sendWebhook(process.env.CTV_WEBHOOK_PAYMENT_URL, payload);
-  return res.json({ result, payloadSent: payload });
+  const result = await sendWebhook(
+    process.env.CTV_WEBHOOK_PAYMENT_URL,
+    payload,
+    'Webhook Received'
+  );
+  return res.status(result.success ? 200 : 502).json({ result, payloadSent: payload });
 });
 
 /* ==========================================================================
